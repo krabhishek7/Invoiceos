@@ -1,0 +1,569 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────
+
+enum BusinessType {
+  B2B
+  B2C
+  MIXED
+}
+
+enum PlanTier {
+  STARTER
+  GROWTH
+  PRO
+}
+
+enum PlanStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  TRIALING
+}
+
+enum UserRole {
+  OWNER
+  ACCOUNTANT
+  STAFF
+  CA
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  CANCELLED
+  IRN_GENERATED
+  OVERDUE
+}
+
+enum GstRate {
+  GST_0
+  GST_5
+  GST_12
+  GST_18
+  GST_28
+}
+
+enum CustomerType {
+  REGISTERED
+  UNREGISTERED
+  CONSUMER
+  EXPORT
+}
+
+enum ReturnType {
+  GSTR1
+  GSTR3B
+  GSTR2A
+}
+
+enum ReturnStatus {
+  DRAFT
+  SUBMITTED
+  FILED
+  ERROR
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum CreditNoteReason {
+  SALES_RETURN
+  POST_SALE_DISCOUNT
+  DEFICIENCY_IN_SERVICE
+  CORRECTION_IN_INVOICE
+  CHANGE_IN_POS
+  FINALIZATION_OF_PROVISIONAL_ASSESSMENT
+  OTHERS
+}
+
+enum ReconciliationMatchStatus {
+  MATCHED
+  IN_2A_NOT_IN_BOOKS
+  IN_BOOKS_NOT_IN_2A
+  AMOUNT_MISMATCH
+  GSTIN_MISMATCH
+}
+
+enum AuditAction {
+  INVOICE_CREATED
+  INVOICE_UPDATED
+  INVOICE_SENT
+  INVOICE_PAID
+  INVOICE_CANCELLED
+  IRN_GENERATED
+  IRN_CANCELLED
+  GSTR1_GENERATED
+  GSTR1_FILED
+  GSTR3B_GENERATED
+  GSTR3B_FILED
+  GSTR2A_FETCHED
+  RECONCILIATION_RUN
+  CUSTOMER_CREATED
+  CUSTOMER_UPDATED
+  ORG_UPDATED
+  USER_INVITED
+  USER_REMOVED
+  PAYMENT_RECEIVED
+  PAYMENT_LINK_CREATED
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_CANCELLED
+  SUBSCRIPTION_UPGRADED
+  CREDIT_NOTE_CREATED
+  CREDIT_NOTE_CANCELLED
+  EWAY_BILL_GENERATED
+  TALLY_IMPORT
+  TALLY_EXPORT
+  EMAIL_SENT
+  WHATSAPP_SENT
+}
+
+// ─── CORE TABLES ─────────────────────────────────────────────
+
+model Organization {
+  id           String       @id @default(cuid())
+  name         String
+  gstin        String?      @unique
+  pan          String?
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  stateCode    String?
+  pincode      String?
+  phone        String?
+  email        String?
+  logoUrl      String?
+  businessType BusinessType @default(MIXED)
+  planTier     PlanTier     @default(STARTER)
+  planStatus   PlanStatus   @default(TRIALING)
+
+  annualTurnover   BigInt?
+  eInvoiceEnabled  Boolean  @default(false)
+  invoicePrefix    String?
+  currentFy        String?
+  nextInvoiceSeq   Int      @default(1)
+
+  // Razorpay
+  razorpayCustomerId     String?
+  razorpaySubscriptionId String?
+  razorpayPlanId         String?
+
+  // GSTN auth tokens (encrypted at rest)
+  gstnAuthToken   String?
+  gstnTokenExpiry DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users             User[]
+  invoices          Invoice[]
+  customers         Customer[]
+  gstReturns        GstReturn[]
+  auditLogs         AuditLog[]
+  invitations       Invitation[]
+  creditNotes       CreditNote[]
+  purchaseInvoices  PurchaseInvoice[]
+  reconciliations   ReconciliationRun[]
+  ewayBills         EwayBill[]
+
+  @@map("organizations")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  email        String
+  name         String?
+  role         UserRole @default(STAFF)
+  avatarUrl    String?
+  passwordHash String?
+
+  // Legacy field — kept for backward compat during migration
+  authProviderId String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs   AuditLog[]
+  invitations Invitation[] @relation("InvitedBy")
+
+  @@unique([orgId, email])
+  @@index([orgId])
+  @@map("users")
+}
+
+model Invitation {
+  id        String       @id @default(cuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  email     String
+  role      UserRole     @default(STAFF)
+  token     String       @unique @default(cuid())
+  status    InviteStatus @default(PENDING)
+  invitedBy String
+  inviter   User         @relation("InvitedBy", fields: [invitedBy], references: [id])
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([token])
+  @@map("invitations")
+}
+
+model Customer {
+  id           String       @id @default(cuid())
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name         String
+  gstin        String?
+  pan          String?
+  email        String?
+  phone        String?
+  customerType CustomerType @default(CONSUMER)
+
+  billingLine1     String?
+  billingLine2     String?
+  billingCity      String?
+  billingState     String?
+  billingStateCode String?
+  billingPincode   String?
+
+  shippingLine1     String?
+  shippingLine2     String?
+  shippingCity      String?
+  shippingState     String?
+  shippingStateCode String?
+  shippingPincode   String?
+
+  placeOfSupply String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices    Invoice[]
+  creditNotes CreditNote[]
+
+  @@index([orgId])
+  @@index([orgId, gstin])
+  @@map("customers")
+}
+
+model Invoice {
+  id        String   @id @default(cuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  invoiceNumber String
+  invoiceDate   DateTime
+  dueDate       DateTime?
+
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id])
+  placeOfSupply String
+
+  subtotal    BigInt   @default(0)
+  cgstAmount  BigInt   @default(0)
+  sgstAmount  BigInt   @default(0)
+  igstAmount  BigInt   @default(0)
+  totalAmount BigInt   @default(0)
+  currency    String   @default("INR")
+
+  status InvoiceStatus @default(DRAFT)
+
+  // e-Invoice
+  irn        String?
+  ackNumber  String?
+  ackDate    DateTime?
+  qrCodeData String?
+  irnError   Json?
+
+  // Payment
+  upiPaymentLink         String?
+  razorpayPaymentLinkId  String?
+  paymentCollectedAt     DateTime?
+  razorpayPaymentId      String?
+
+  // Storage
+  pdfUrl      String?
+  jsonPayload Json?
+
+  // Compliance
+  isReverseCharge Boolean @default(false)
+  isExport        Boolean @default(false)
+  financialYear   String?
+
+  // Email/WhatsApp tracking
+  emailSentAt    DateTime?
+  whatsappSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items       InvoiceItem[]
+  creditNotes CreditNote[]
+  ewayBill    EwayBill?
+
+  @@unique([orgId, invoiceNumber])
+  @@index([orgId, status])
+  @@index([orgId, invoiceDate])
+  @@index([orgId, customerId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  description String
+  hsnSacCode  String?
+  quantity    Int      @default(1)
+  unit        String   @default("NOS")
+  unitPrice   BigInt
+
+  discountPercent Int    @default(0)
+  taxableValue    BigInt @default(0)
+
+  gstRate    GstRate @default(GST_18)
+  cgstRate   Int     @default(0)
+  sgstRate   Int     @default(0)
+  igstRate   Int     @default(0)
+  cgstAmount BigInt  @default(0)
+  sgstAmount BigInt  @default(0)
+  igstAmount BigInt  @default(0)
+  total      BigInt  @default(0)
+
+  sortOrder Int @default(0)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+// ─── CREDIT / DEBIT NOTES ────────────────────────────────────
+
+model CreditNote {
+  id    String       @id @default(cuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  creditNoteNumber String
+  creditNoteDate   DateTime
+  reason           CreditNoteReason
+
+  invoiceId  String
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  subtotal    BigInt @default(0)
+  cgstAmount  BigInt @default(0)
+  sgstAmount  BigInt @default(0)
+  igstAmount  BigInt @default(0)
+  totalAmount BigInt @default(0)
+
+  status String @default("ACTIVE") // ACTIVE, CANCELLED
+
+  irn       String?
+  ackNumber String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items CreditNoteItem[]
+
+  @@unique([orgId, creditNoteNumber])
+  @@index([orgId, invoiceId])
+  @@map("credit_notes")
+}
+
+model CreditNoteItem {
+  id           String     @id @default(cuid())
+  creditNoteId String
+  creditNote   CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+
+  description  String
+  hsnSacCode   String?
+  quantity     Int    @default(1)
+  unit         String @default("NOS")
+  unitPrice    BigInt
+  taxableValue BigInt @default(0)
+
+  gstRate    GstRate @default(GST_18)
+  cgstAmount BigInt  @default(0)
+  sgstAmount BigInt  @default(0)
+  igstAmount BigInt  @default(0)
+  total      BigInt  @default(0)
+
+  @@index([creditNoteId])
+  @@map("credit_note_items")
+}
+
+// ─── PURCHASE INVOICES (for GSTR-2A reconciliation) ──────────
+
+model PurchaseInvoice {
+  id    String       @id @default(cuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  supplierName  String
+  supplierGstin String
+  invoiceNumber String
+  invoiceDate   DateTime
+  placeOfSupply String?
+
+  taxableValue BigInt @default(0)
+  cgstAmount   BigInt @default(0)
+  sgstAmount   BigInt @default(0)
+  igstAmount   BigInt @default(0)
+  totalAmount  BigInt @default(0)
+
+  itcEligible Boolean @default(true)
+  itcClaimed  Boolean @default(false)
+
+  source String @default("MANUAL") // MANUAL, TALLY_IMPORT, GSTR2A
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reconciliationEntries ReconciliationEntry[]
+
+  @@index([orgId])
+  @@index([orgId, supplierGstin])
+  @@map("purchase_invoices")
+}
+
+// ─── RECONCILIATION ──────────────────────────────────────────
+
+model ReconciliationRun {
+  id    String       @id @default(cuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  period  String // YYYY-MM
+  status  String @default("COMPLETED") // RUNNING, COMPLETED, FAILED
+  summary Json?  // { matched: n, in2aNotBooks: n, inBooksNot2a: n, mismatched: n }
+
+  createdAt DateTime @default(now())
+
+  entries ReconciliationEntry[]
+
+  @@index([orgId, period])
+  @@map("reconciliation_runs")
+}
+
+model ReconciliationEntry {
+  id    String            @id @default(cuid())
+  runId String
+  run   ReconciliationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  matchStatus       ReconciliationMatchStatus
+  supplierGstin     String
+  supplierName      String?
+  invoiceNumber     String?
+  invoiceDate       DateTime?
+  gstr2aAmount      BigInt?
+  bookAmount        BigInt?
+  difference        BigInt?
+  purchaseInvoiceId String?
+  purchaseInvoice   PurchaseInvoice? @relation(fields: [purchaseInvoiceId], references: [id])
+
+  @@index([runId])
+  @@map("reconciliation_entries")
+}
+
+// ─── E-WAY BILL ──────────────────────────────────────────────
+
+model EwayBill {
+  id    String       @id @default(cuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  invoiceId String  @unique
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  ewayBillNumber String?
+  ewayBillDate   DateTime?
+  validUntil     DateTime?
+
+  fromPlace      String?
+  toPlace        String?
+  transportMode  String?  // ROAD, RAIL, AIR, SHIP
+  vehicleNumber  String?
+  transporterId  String?
+  distance       Int?     // in km
+
+  status    String @default("DRAFT") // DRAFT, GENERATED, CANCELLED
+  errorLog  Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@map("eway_bills")
+}
+
+// ─── GST RETURNS ─────────────────────────────────────────────
+
+model GstReturn {
+  id     String       @id @default(cuid())
+  orgId  String
+  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  returnType ReturnType
+  period     String
+  status     ReturnStatus @default(DRAFT)
+
+  filedAt DateTime?
+  arn     String?
+
+  jsonPayload     Json?
+  errorLog        Json?
+  gstnReferenceId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, returnType, period])
+  @@index([orgId, returnType])
+  @@map("gst_returns")
+}
+
+// ─── AUDIT LOG ───────────────────────────────────────────────
+
+model AuditLog {
+  id     String       @id @default(cuid())
+  orgId  String
+  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  userId String?
+  user   User?        @relation(fields: [userId], references: [id])
+
+  action     AuditAction
+  entityType String
+  entityId   String
+  metadata   Json?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@index([orgId, entityType, entityId])
+  @@map("audit_logs")
+}
